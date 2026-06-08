@@ -15,13 +15,15 @@ module adc_latch_param (
     // Выходные параметры для модуля ascan
     output reg [15:0] o_n_samples,    // Количество собираемых 12-битных отсчетов (подключается к i_n_samples в ascan)
     output reg [7:0]  o_accum,        // Параметр "накопление" (8-битное значение)
-    output reg [3:0]  o_accum_type    // Параметр "тип накопления" (4-битное значение)
+    output reg [3:0]  o_accum_type,   // Параметр "тип накопления" (4-битное значение)
+    output reg [15:0] o_delay_time    // Время задержки (16-битное значение)
 );
 
     // Теневые регистры для хранения принятых параметров до прихода i_adc_sync
     reg [15:0] shadow_n_samples;
     reg [7:0]  shadow_accum;
     reg [3:0]  shadow_accum_type;
+    reg [15:0] shadow_delay_time;
 
     // Декодирование команд на частоте adc_clk
     always @(posedge adc_clk or negedge adc_rst_n) begin
@@ -29,6 +31,7 @@ module adc_latch_param (
             shadow_n_samples  <= 16'd0;
             shadow_accum      <= 8'd0;
             shadow_accum_type <= 4'd0;
+            shadow_delay_time <= 16'd0;
         end else begin
             if (i_cmd_val) begin
                 // Проверяем, что команда предназначена для домена adc_clk (старший байт адреса == 2)
@@ -46,6 +49,10 @@ module adc_latch_param (
                             // Адрес 3: Тип накопления (4-битное значение)
                             shadow_accum_type <= i_cmd_data[3:0];
                         end
+                        8'd4: begin
+                            // Адрес 4: Время задержки (16-битное значение)
+                            shadow_delay_time <= i_cmd_data[15:0];
+                        end
                         // Резерв для других параметров на частоте adc_clk
                         default: ;
                     endcase
@@ -60,11 +67,13 @@ module adc_latch_param (
             o_n_samples  <= 16'd0;
             o_accum      <= 8'd0;
             o_accum_type <= 4'd0;
+            o_delay_time <= 16'd0;
         end else begin
             if (i_adc_sync) begin
                 o_n_samples  <= shadow_n_samples;
                 o_accum      <= shadow_accum;
                 o_accum_type <= shadow_accum_type;
+                o_delay_time <= shadow_delay_time;
             end
         end
     end
