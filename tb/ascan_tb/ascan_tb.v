@@ -4,7 +4,7 @@ module ascan_tb;
 
     // Parameters
     parameter ADDR_WIDTH = 11;
-
+    
     // Inputs (Regs)
     reg                     sys_clk;
     reg                     sys_rst_n;
