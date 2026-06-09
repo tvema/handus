@@ -6,16 +6,16 @@ module vrc #(
     parameter P = 16 // Количество дробных бит для вычислений с фиксированной точкой
 ) (
     // Тактовый сигнал и сброс (согласно глобальным правилам проекта)
-    input  wire        adc_clk,          // adc_clk: 65MHz
-    input  wire        adc_rst_n,        // Синхронизированный асинхронный сброс (активный низкий)
+    input  wire        dac_clk,          // dac_clk: 50MHz
+    input  wire        dac_rst_n,        // Синхронизированный асинхронный сброс (активный низкий)
 
     // Входной сигнал синхронизации
-    input  wire        i_adc_sync,       // Импульс запуска (внешняя синхронизация)
+    input  wire        i_dac_sync,       // Импульс запуска (синхронизирован в dac_clk)
 
     // Входные конфигурационные параметры
     input  wire [1:0]  i_vrc_type,       // 00 - Константный, 01 - Последовательный, 10 - Одинаковый/Параллельный
     input  wire [7:0]  i_dac_div,        // Делитель частоты обновления ЦАП (интервал изменения шага)
-    input  wire [15:0] i_start_delay,    // Время задержки начала нарастания (в тактах adc_clk)
+    input  wire [15:0] i_start_delay,    // Время задержки начала нарастания (в тактах dac_clk)
     input  wire [10:0] i_init_gain,      // Начальное значение усиления
     input  wire [31:0] i_rate_1,         // Скорость нарастания 1 (float, умноженный на 2^P)
     input  wire [15:0] i_duration_1,     // Время нарастания 1 (количество шагов обновления)
@@ -24,9 +24,12 @@ module vrc #(
     input  wire [9:0]  i_dac_min,        // Минимальное ограничение кода ЦАП
     input  wire [9:0]  i_dac_max,        // Максимальное ограничение кода ЦАП
 
+    // Сигнал готовности приемника dac_spi
+    input  wire        i_dac_rdy,        // Готовность dac_spi к приему новых данных (очищает o_dac_data_vld)
+
     // Выходной интерфейс управления для dac_spi
     output reg         o_dac_vld,        // Высокий уровень в течение всего времени нарастания сигнала ВРЧ
-    output reg         o_dac_data_vld,   // Строб валидности данных для защелкивания в dac_spi
+    output reg         o_dac_data_vld,   // Строб валидности данных для защелкивания в dac_spi (работает по рукопожатию)
     output reg  [9:0]  o_dac1,           // Выходной код для ЦАП 1 (10-бит)
     output reg  [9:0]  o_dac2            // Выходной код для ЦАП 2 (10-бит)
 );
@@ -51,11 +54,11 @@ module vrc #(
     reg [7:0] div_cnt;
     wire      tick = (i_dac_div <= 8'd1) ? 1'b1 : (div_cnt == i_dac_div - 8'd1);
 
-    always @(posedge adc_clk or negedge adc_rst_n) begin
-        if (!adc_rst_n) begin
+    always @(posedge dac_clk or negedge dac_rst_n) begin
+        if (!dac_rst_n) begin
             div_cnt <= 8'd0;
         end else begin
-            if (i_adc_sync) begin
+            if (i_dac_sync) begin
                 div_cnt <= 8'd0;
             end else if (state == STATE_RAMP1 || state == STATE_RAMP2) begin
                 if (tick) begin
@@ -70,13 +73,13 @@ module vrc #(
     end
 
     // Конечный автомат управления профилем ВРЧ
-    always @(posedge adc_clk or negedge adc_rst_n) begin
-        if (!adc_rst_n) begin
+    always @(posedge dac_clk or negedge dac_rst_n) begin
+        if (!dac_rst_n) begin
             state      <= STATE_IDLE;
             cnt        <= 16'd0;
             gain_accum <= {(32+P){1'b0}};
         end else begin
-            if (i_adc_sync) begin
+            if (i_dac_sync) begin
                 // Инициализация аккумулятора начальным усилением со сдвигом на P бит
                 gain_accum <= { {32{1'b0}}, i_init_gain } << P;
                 
@@ -97,11 +100,11 @@ module vrc #(
             end else begin
                 case (state)
                     STATE_IDLE: begin
-                        // Ожидание i_adc_sync
+                        // Ожидание i_dac_sync
                     end
 
                     STATE_DELAY: begin
-                        // Задержка отсчитывается по тактам adc_clk
+                        // Задержка отсчитывается по тактам dac_clk
                         if (cnt > 16'd1) begin
                             cnt <= cnt - 16'd1;
                         end else begin
@@ -219,8 +222,8 @@ module vrc #(
     end
 
     // Выходные регистры для фильтрации глитчей и формирования сигналов управления dac_spi
-    always @(posedge adc_clk or negedge adc_rst_n) begin
-        if (!adc_rst_n) begin
+    always @(posedge dac_clk or negedge dac_rst_n) begin
+        if (!dac_rst_n) begin
             o_dac1         <= 10'd0;
             o_dac2         <= 10'd0;
             o_dac_vld      <= 1'b0;
@@ -232,14 +235,16 @@ module vrc #(
             // Сигнал огибающей активности: высокий в течении времени пока идет нарастание (RAMP1, RAMP2)
             o_dac_vld <= (state == STATE_RAMP1 || state == STATE_RAMP2);
             
-            // Генерация одиночных импульсов записи (data_vld) для dac_spi
-            if (i_adc_sync) begin
+            // Рукопожатие: Выставляем o_dac_data_vld при обновлении данных,
+            // сбрасываем при получении подтверждения готовности (i_dac_rdy), если в этот же момент нет нового шага.
+            if (i_dac_sync) begin
                 // Запуск при инициализации нового профиля
                 o_dac_data_vld <= 1'b1;
             end else if ((state == STATE_RAMP1 || state == STATE_RAMP2) && tick) begin
                 // Запуск на каждом шаге деления частоты при нарастании
                 o_dac_data_vld <= 1'b1;
-            end else begin
+            end else if (i_dac_rdy) begin
+                // Данные были успешно защёлкнуты/отправлены dac_spi
                 o_dac_data_vld <= 1'b0;
             end
         end
