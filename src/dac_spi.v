@@ -14,13 +14,12 @@ module dac_spi #(
     input  wire        dac_rst_n,       // dac_rst_n: синхронизированный сброс (без префикса "i_")
 
     // Потоковый интерфейс данных (в домене dac_clk)
-    input  wire        i_dac_sync,      // Импульс синхронизации для запуска цикла записи ЦАП
     input  wire [9:0]  i_dac_data,      // 10-битное входное значение для ЦАП
-    input  wire        i_dac_data_vld,  // Строб валидности/защелкивания для i_dac_data
-    output reg         o_dac_data_rdy,  // Высокий уровень, когда модуль готов принять новые данные и импульс i_dac_sync
+    input  wire        i_dac_data_vld,  // Строб валидности данных (запускает трансляцию при o_dac_data_rdy)
+    output reg         o_dac_data_rdy,  // Готовность к приему: '1' - свободен, '0' - идет передача
 
     // Аппаратный интерфейс ЦАП (SPI)
-    output reg         o_dac_sclk,      // SPI Serial Clock (25 MHz = dac_clk / 2)
+    output reg         o_dac_sclk,      // SPI Serial Clock (фиксированная частота 25 MHz = dac_clk / 2)
     output reg         o_dac_sdin,      // SPI Serial Data Input (SDIN/MOSI)
     output reg         o_dac_sync_n     // SPI Frame Sync (SYNC_N / CS_N)
 );
@@ -30,75 +29,64 @@ module dac_spi #(
     localparam STATE_TX   = 1'b1;
 
     reg        state;
-    reg [5:0]  step_cnt;
-    reg [9:0]  r_dac_data;
-    reg [15:0] shift_reg;
+    reg [4:0]  edge_cnt;        // Счетчик полупериодов SCLK (всего 32 перепада для передачи 16 бит)
+    reg [15:0] shift_reg;       // Сдвиговый регистр кадра передачи
 
-    // 1. Защелкивание входящих данных по стробу валидности
-    always @(posedge dac_clk or negedge dac_rst_n) begin
-        if (!dac_rst_n) begin
-            r_dac_data <= 10'd0;
-        end else if (i_dac_data_vld) begin
-            r_dac_data <= i_dac_data;
-        end
-    end
-
-    // 2. Конечный автомат передачи SPI
+    // Конечный автомат передачи SPI
     always @(posedge dac_clk or negedge dac_rst_n) begin
         if (!dac_rst_n) begin
             state          <= STATE_IDLE;
-            step_cnt       <= 6'd0;
+            edge_cnt       <= 5'd0;
             shift_reg      <= 16'd0;
             o_dac_sclk     <= 1'b1;
             o_dac_sdin     <= 1'b0;
             o_dac_sync_n   <= 1'b1;
-            o_dac_data_rdy <= 1'b1; // Готов к работе сразу после сброса
+            o_dac_data_rdy <= 1'b1;
         end else begin
             case (state)
                 STATE_IDLE: begin
                     o_dac_sync_n   <= 1'b1;
                     o_dac_sclk     <= 1'b1;
                     o_dac_sdin     <= 1'b0;
-                    step_cnt       <= 6'd0;
+                    edge_cnt       <= 5'd0;
+                    o_dac_data_rdy <= 1'b1; // Всегда готовы принять новые данные в простое
                     
-                    if (i_dac_sync) begin
-                        // Форматирование 16-битного кадра DAC101S101:
+                    // Запуск транзакции по приходу валидных данных
+                    if (i_dac_data_vld) begin
+                        // Форматируем 16-битный кадр ЦАП напрямую из входной шины:
                         // [15:12] = Настраиваемый режим работы (DAC_OP_MODE)
-                        // [11:2]  = 10 бит данных ЦАП (r_dac_data)
+                        // [11:2]  = 10 бит данных ЦАП (i_dac_data)
                         // [1:0]   = 2'b00 (Младшие неиспользуемые биты / Don't Care)
-                        shift_reg      <= {DAC_OP_MODE, r_dac_data, 2'b00};
+                        shift_reg      <= {DAC_OP_MODE, i_dac_data, 2'b00};
                         o_dac_sync_n   <= 1'b0;
-                        o_dac_data_rdy <= 1'b0; // Сбрасываем готовность, так как начинается отправка
+                        o_dac_data_rdy <= 1'b0; // Блокируем новые запросы
+                        
+                        // Сразу же выставляем старший бит (MSB) кадра на линию данных
+                        o_dac_sdin     <= DAC_OP_MODE[3]; 
                         state          <= STATE_TX;
-                    end else begin
-                        o_dac_data_rdy <= 1'b1; // Удерживаем готовность в IDLE
                     end
                 end
 
                 STATE_TX: begin
-                    step_cnt       <= step_cnt + 1'b1;
-                    o_dac_data_rdy <= 1'b0; // Гарантированно занят в процессе передачи
+                    o_dac_data_rdy <= 1'b0; // Заняты передачей
 
-                    if (step_cnt == 6'd32) begin
-                        // Конец передачи (16 полных периодов SCLK, 32 такта dac_clk)
+                    if (edge_cnt == 5'd31) begin
+                        // Конец передачи (все 16 бит переданы, SCLK вернулся в HIGH)
                         o_dac_sync_n   <= 1'b1;
                         o_dac_sclk     <= 1'b1;
                         o_dac_sdin     <= 1'b0;
-                        o_dac_data_rdy <= 1'b1; // Возвращаем готовность перед переходом в IDLE
+                        o_dac_data_rdy <= 1'b1; // Разрешаем запись на следующем такте
                         state          <= STATE_IDLE;
                     end else begin
-                        // Деление dac_clk (50MHz) на 2 дает 25MHz SCLK (что меньше лимита микросхемы в 30MHz)
-                        // SCLK в высоком уровне на четных тактах, в низком на нечетных
-                        o_dac_sclk <= ~step_cnt[0];
+                        edge_cnt   <= edge_cnt + 1'b1;
+                        o_dac_sclk <= ~o_dac_sclk; // Переключаем SCLK на каждом такте dac_clk (50MHz -> 25MHz)
 
-                        // Сдвиг данных на спаде SCLK (подготовка к нарастающему фронту SCLK)
-                        // Спаду SCLK соответствуют нечетные шаги автомата (1, 3, 5...).
-                        if (step_cnt[0] == 1'b1) begin
-                            shift_reg <= {shift_reg[14:0], 1'b0};
+                        // Сдвигаем данные на нарастающем фронте SCLK (когда текущий SCLK равен 0, а новый будет 1)
+                        // DAC101S101 считывает данные на спаде SCLK, поэтому обновляем MOSI строго на фронте.
+                        if (o_dac_sclk == 1'b0) begin
+                            shift_reg  <= {shift_reg[14:0], 1'b0};
+                            o_dac_sdin <= shift_reg[14]; // Выдаем следующий бит (MSB-1)
                         end
-
-                        // Вывод текущего старшего бита (MSB) сдвигового регистра на линию MOSI
-                        o_dac_sdin <= shift_reg[15];
                     end
                 end
 

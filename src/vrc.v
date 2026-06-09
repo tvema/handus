@@ -27,7 +27,6 @@ module vrc #(
     // Выходной интерфейс управления для dac_spi
     output reg         o_dac_vld,        // Высокий уровень в течение всего времени нарастания сигнала ВРЧ
     output reg         o_dac_data_vld,   // Строб валидности данных для защелкивания в dac_spi
-    output reg         o_dac_sync,       // Импульс запуска цикла передачи SPI в dac_spi
     output reg  [9:0]  o_dac1,           // Выходной код для ЦАП 1 (10-бит)
     output reg  [9:0]  o_dac2            // Выходной код для ЦАП 2 (10-бит)
 );
@@ -226,7 +225,6 @@ module vrc #(
             o_dac2         <= 10'd0;
             o_dac_vld      <= 1'b0;
             o_dac_data_vld <= 1'b0;
-            o_dac_sync     <= 1'b0;
         end else begin
             o_dac1 <= dac1_next;
             o_dac2 <= dac2_next;
@@ -234,18 +232,15 @@ module vrc #(
             // Сигнал огибающей активности: высокий в течении времени пока идет нарастание (RAMP1, RAMP2)
             o_dac_vld <= (state == STATE_RAMP1 || state == STATE_RAMP2);
             
-            // Генерация одиночных импульсов записи/синхронизации для dac_spi
+            // Генерация одиночных импульсов записи (data_vld) для dac_spi
             if (i_adc_sync) begin
                 // Запуск при инициализации нового профиля
                 o_dac_data_vld <= 1'b1;
-                o_dac_sync     <= 1'b1;
             end else if ((state == STATE_RAMP1 || state == STATE_RAMP2) && tick) begin
                 // Запуск на каждом шаге деления частоты при нарастании
                 o_dac_data_vld <= 1'b1;
-                o_dac_sync     <= 1'b1;
             end else begin
                 o_dac_data_vld <= 1'b0;
-                o_dac_sync     <= 1'b0;
             end
         end
     end
