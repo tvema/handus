@@ -13,18 +13,16 @@ module dac_spi #(
     input  wire        dac_clk,         // dac_clk: 50MHz (без префикса "i_")
     input  wire        dac_rst_n,       // dac_rst_n: синхронизированный сброс (без префикса "i_")
 
-    // Интерфейс управления и данных
-    input  wire        i_dac_sync,      // Импульс синхронизации для запуска цикла записи ЦАП (в домене dac_clk)
+    // Потоковый интерфейс данных (в домене dac_clk)
+    input  wire        i_dac_sync,      // Импульс синхронизации для запуска цикла записи ЦАП
     input  wire [9:0]  i_dac_data,      // 10-битное входное значение для ЦАП
     input  wire        i_dac_data_vld,  // Строб валидности/защелкивания для i_dac_data
+    output reg         o_dac_data_rdy,  // Высокий уровень, когда модуль готов принять новые данные и импульс i_dac_sync
 
     // Аппаратный интерфейс ЦАП (SPI)
     output reg         o_dac_sclk,      // SPI Serial Clock (25 MHz = dac_clk / 2)
     output reg         o_dac_sdin,      // SPI Serial Data Input (SDIN/MOSI)
-    output reg         o_dac_sync_n,    // SPI Frame Sync (SYNC_N / CS_N)
-
-    // Выход статуса
-    output reg         o_busy           // Высокий уровень во время активной передачи по SPI
+    output reg         o_dac_sync_n     // SPI Frame Sync (SYNC_N / CS_N)
 );
 
     // Состояния конечного автомата (FSM)
@@ -48,44 +46,46 @@ module dac_spi #(
     // 2. Конечный автомат передачи SPI
     always @(posedge dac_clk or negedge dac_rst_n) begin
         if (!dac_rst_n) begin
-            state        <= STATE_IDLE;
-            step_cnt     <= 6'd0;
-            shift_reg    <= 16'd0;
-            o_dac_sclk   <= 1'b1;
-            o_dac_sdin   <= 1'b0;
-            o_dac_sync_n <= 1'b1;
-            o_busy       <= 1'b0;
+            state          <= STATE_IDLE;
+            step_cnt       <= 6'd0;
+            shift_reg      <= 16'd0;
+            o_dac_sclk     <= 1'b1;
+            o_dac_sdin     <= 1'b0;
+            o_dac_sync_n   <= 1'b1;
+            o_dac_data_rdy <= 1'b1; // Готов к работе сразу после сброса
         end else begin
             case (state)
                 STATE_IDLE: begin
-                    o_dac_sync_n <= 1'b1;
-                    o_dac_sclk   <= 1'b1;
-                    o_dac_sdin   <= 1'b0;
-                    o_busy       <= 1'b0;
-                    step_cnt     <= 6'd0;
+                    o_dac_sync_n   <= 1'b1;
+                    o_dac_sclk     <= 1'b1;
+                    o_dac_sdin     <= 1'b0;
+                    step_cnt       <= 6'd0;
                     
                     if (i_dac_sync) begin
                         // Форматирование 16-битного кадра DAC101S101:
                         // [15:12] = Настраиваемый режим работы (DAC_OP_MODE)
                         // [11:2]  = 10 бит данных ЦАП (r_dac_data)
                         // [1:0]   = 2'b00 (Младшие неиспользуемые биты / Don't Care)
-                        shift_reg    <= {DAC_OP_MODE, r_dac_data, 2'b00};
-                        o_dac_sync_n <= 1'b0;
-                        o_busy       <= 1'b1;
-                        state        <= STATE_TX;
+                        shift_reg      <= {DAC_OP_MODE, r_dac_data, 2'b00};
+                        o_dac_sync_n   <= 1'b0;
+                        o_dac_data_rdy <= 1'b0; // Сбрасываем готовность, так как начинается отправка
+                        state          <= STATE_TX;
+                    end else begin
+                        o_dac_data_rdy <= 1'b1; // Удерживаем готовность в IDLE
                     end
                 end
 
                 STATE_TX: begin
-                    step_cnt <= step_cnt + 1'b1;
+                    step_cnt       <= step_cnt + 1'b1;
+                    o_dac_data_rdy <= 1'b0; // Гарантированно занят в процессе передачи
 
                     if (step_cnt == 6'd32) begin
                         // Конец передачи (16 полных периодов SCLK, 32 такта dac_clk)
-                        o_dac_sync_n <= 1'b1;
-                        o_dac_sclk   <= 1'b1;
-                        o_dac_sdin   <= 1'b0;
-                        o_busy       <= 1'b0;
-                        state        <= STATE_IDLE;
+                        o_dac_sync_n   <= 1'b1;
+                        o_dac_sclk     <= 1'b1;
+                        o_dac_sdin     <= 1'b0;
+                        o_dac_data_rdy <= 1'b1; // Возвращаем готовность перед переходом в IDLE
+                        state          <= STATE_IDLE;
                     end else begin
                         // Деление dac_clk (50MHz) на 2 дает 25MHz SCLK (что меньше лимита микросхемы в 30MHz)
                         // SCLK в высоком уровне на четных тактах, в низком на нечетных

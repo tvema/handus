@@ -7,7 +7,7 @@ module pulse(
 
     input   [15:0]      i_charge_time,
     input   [15:0]      i_transmit_time,
-    input   [15:0]      i_pulse_width,
+    input   [7:0]       i_pulse_width,
 
     output              o_turn_on,
     output              o_strike
