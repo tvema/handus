@@ -1,0 +1,27 @@
+VERILATOR=verilator
+IVERILOG=iverilog
+VVP=vvp
+
+FLAGS = -Wall -Winfloop -g2005-sv -DTESTMODE=1 -DTARGET_NAME="\""$(TARGET)"\""
+
+# Target executable
+TARGET = {{tbName}}.vvp
+WAVE_VCD = {{tbName}}.vcd
+WAVE_CFG = {{tbName}}.gtkw
+
+# Source files
+SOURCES = {{files}} {{tbName}}.v
+
+all: run
+
+build:
+	$(IVERILOG) -o $(TARGET) $(SOURCES)
+
+run: build
+	$(VVP) $(TARGET)
+
+wave: run
+	gtkwave --rcvar 'fontname_signals Monospace 11' $(WAVE_VCD) $(WAVE_CFG)
+
+clean:
+	rm -f $(TARGET) *.vcd
