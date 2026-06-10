@@ -2,7 +2,7 @@
 
 `timescale 1ns / 1ps
 
-module adc_latch_param (
+module ascan_latch_param (
     input             adc_clk,        // Входная тактовая частота 65MHz (без i_)
     input             adc_rst_n,      // Синхронизированный сброс для домена adc_clk (без i_)
     input             i_adc_sync,     // Сигнал внешней синхронизации запуска в домене adc_clk
