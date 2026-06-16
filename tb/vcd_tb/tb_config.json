@@ -1,0 +1,9 @@
+{
+  "tbName": "vcd_tb",
+  "filesToInclude": [
+    "src/log.v",
+    "tb/vcd_tb/vcd_tb.v"
+  ],
+  "tbExt": ".v",
+  "vcdName": "vcd_tb.vcd"
+}

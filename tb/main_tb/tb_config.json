@@ -1,0 +1,24 @@
+{
+  "tbName": "main_tb",
+  "filesToInclude": [
+    "src/main.v",
+    "src/sync_cc.v",
+    "src/ascan.v",
+    "src/param.v",
+    "src/fir_filter.v",
+    "src/pulse.v",
+    "src/pulse_latch_param.v",
+    "src/dac_spi.v",
+    "src/vrc.v",
+    "src/vrc_param_latch.v",
+    "src/ascan_latch_param.v",
+    "src/log_latch_param.v",
+    "src/log.v",
+    "src/packet_builder.v",
+    "src/sys_latch_param.v",
+    "src/param_hub.v",
+    "tb/main_tb/main_tb.v"
+  ],
+  "tbExt": ".v",
+  "vcdName": "main_tb.vcd"
+}
