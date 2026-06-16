@@ -228,7 +228,7 @@ module param_hub (
         .log_rst_n    (log_rst_n),
         .i_log_sync   (i_log_sync),
 
-        .i_cmd_val    (log_cmd_val),
+        .i_cmd_vld    (log_cmd_val),
         .i_cmd_addr   (log_cmd_addr),
         .i_cmd_data   (log_cmd_data),
 
