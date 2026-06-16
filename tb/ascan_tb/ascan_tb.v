@@ -39,6 +39,7 @@ module ascan_tb;
         .i_in_data(i_in_data),
         .i_adc_sync(i_adc_sync),
         .i_n_samples(i_n_samples),
+        .i_skip_ticks(16'd10),
         .i_accum(i_accum),
         .i_accum_type(i_accum_type)
     );

@@ -57,6 +57,13 @@ module ascan #(
     wire               decim_vld;
     wire               decim_last = (sample_cnt == r_n_samples - 1);
 
+    //--------------------------------------------------------------------------
+    // 3. Модуль упаковщика данных (домен adc_clk)
+    //--------------------------------------------------------------------------
+    reg         active;
+    wire [31:0] fifo_wdata;
+    wire        fifo_wen;
+    
     ascan_decimator u_decimator (
         .clk          (adc_clk),
         .rst_n        (adc_rst_n),
@@ -69,13 +76,6 @@ module ascan #(
         .o_data       (decim_data),
         .o_vld        (decim_vld)
     );
-
-    //--------------------------------------------------------------------------
-    // 3. Модуль упаковщика данных (домен adc_clk)
-    //--------------------------------------------------------------------------
-    reg         active;
-    wire [31:0] fifo_wdata;
-    wire        fifo_wen;
 
     ascan_packer u_packer (
         .adc_clk   (adc_clk),
