@@ -56,19 +56,13 @@ module ascan #(
     wire signed [11:0] decim_data;
     wire               decim_vld;
     wire               decim_last = (sample_cnt == r_n_samples - 1);
+    reg                adc_collecting;
 
-    //--------------------------------------------------------------------------
-    // 3. Модуль упаковщика данных (домен adc_clk)
-    //--------------------------------------------------------------------------
-    reg         active;
-    wire [31:0] fifo_wdata;
-    wire        fifo_wen;
-    
     ascan_decimator u_decimator (
         .clk          (adc_clk),
         .rst_n        (adc_rst_n),
         .i_sync       (i_adc_sync),
-        .i_active     (active),
+        .i_active     (adc_collecting), // Работает только во время непосредственного приема отсчетов АЦП
         .i_last       (decim_last),
         .i_accum      (r_accum),
         .i_accum_type (r_accum_type),
@@ -77,11 +71,18 @@ module ascan #(
         .o_vld        (decim_vld)
     );
 
+    //--------------------------------------------------------------------------
+    // 3. Модуль упаковщика данных (домен adc_clk)
+    //--------------------------------------------------------------------------
+    reg         active;
+    wire [31:0] fifo_wdata;
+    wire        fifo_wen;
+
     ascan_packer u_packer (
         .adc_clk   (adc_clk),
-        .rst_n     (adc_rst_n), // Используем сброс домена АЦП
+        .rst_n     (adc_rst_n),
         .i_sync_pe (i_adc_sync),
-        .i_active  (active),
+        .i_active  (active),        // Упаковщик активен и во время фазы сбора, и во время очистки
         .i_vld     (decim_vld),
         .i_data    (decim_data),
         .o_data    (fifo_wdata),
@@ -103,10 +104,15 @@ module ascan #(
     // Сигналы для реализации пропуска тактов перед стартом записи
     reg [15:0] skip_cnt;
     reg        skip_active;
+    
+    // Контроль очистки 2-тактного конвейера обработки
+    reg [1:0]  pipeline_purge;
 
     always @(posedge adc_clk or negedge adc_rst_n) begin
         if (!adc_rst_n) begin
             active            <= 1'b0;
+            adc_collecting    <= 1'b0;
+            pipeline_purge    <= 2'd0;
             skip_active       <= 1'b0;
             skip_cnt          <= 16'd0;
             sample_cnt        <= 16'd0;
@@ -117,45 +123,58 @@ module ascan #(
             ram_page_size_1   <= 16'd0;
         end else begin
             if (i_adc_sync && (i_n_samples > 0)) begin
-                // Если задан пропуск тактов, переходим в состояние ожидания
-                if (i_skip_ticks > 0) begin
-                    skip_active <= 1'b1;
-                    skip_cnt    <= i_skip_ticks;
-                    active      <= 1'b0;
-                end else begin
-                    skip_active <= 1'b0;
-                    active      <= 1'b1;
-                end
                 sample_cnt        <= 16'd0;
                 wr_word_cnt       <= 16'd0;
+                // Если задан пропуск тактов, переходим в состояние ожидания
+                if (i_skip_ticks > 0) begin
+                    skip_active    <= 1'b1;
+                    skip_cnt       <= i_skip_ticks;
+                    active         <= 1'b0;
+                    adc_collecting <= 1'b0;
+                end else begin
+                    skip_active    <= 1'b0;
+                    active         <= 1'b1;
+                    adc_collecting <= 1'b1;
+                    pipeline_purge <= 2'd2; // 2 такта на прохождение конвейера
+                end
             end else if (skip_active) begin
                 // Отсчет тактов пропуска
                 if (skip_cnt == 16'd1) begin
-                    skip_active <= 1'b0;
-                    active      <= 1'b1;
+                    skip_active    <= 1'b0;
+                    active         <= 1'b1;
+                    adc_collecting <= 1'b1;
+                    pipeline_purge <= 2'd2;
                 end else begin
-                    skip_cnt    <= skip_cnt - 1'b1;
+                    skip_cnt       <= skip_cnt - 1'b1;
                 end
             end else if (active) begin
-                sample_cnt <= sample_cnt + 1'b1;
-                
+                if (adc_collecting) begin
+                    sample_cnt <= sample_cnt + 1'b1;
+                    // Проверяем достижение заданного количества отсчетов АЦП
+                    if (sample_cnt == r_n_samples - 1) begin
+                        adc_collecting <= 1'b0; // Завершаем непосредственный прием с АЦП
+                    end
+                end else begin
+                    // Очистка конвейера (вытеснение последних отсчетов через дециматор и упаковщик)
+                    if (pipeline_purge == 2'd1) begin
+                        active <= 1'b0; // Полное завершение цикла записи страницы
+                        
+                        // Сохраняем реальное количество записанных 32-битных слов
+                        if (wr_page == 1'b0)
+                            ram_page_size_0 <= wr_word_cnt + fifo_wen;
+                        else
+                            ram_page_size_1 <= wr_word_cnt + fifo_wen;
+                            
+                        wr_page           <= ~wr_page;
+                        write_done_toggle <= ~write_done_toggle;
+                    end else begin
+                        pipeline_purge <= pipeline_purge - 1'b1;
+                    end
+                end
+
+                // Инкремент адреса записи при готовности слова (происходит на протяжении всей фазы active)
                 if (fifo_wen) begin
                     wr_word_cnt <= wr_word_cnt + 1'b1;
-                end
-                
-                // Проверяем достижение заданного количества отсчетов АЦП
-                if (sample_cnt == r_n_samples - 1) begin
-                    active <= 1'b0;
-                    
-                    // Сохраняем реальное количество записанных 32-битных слов
-                    // (с учетом флага fifo_wen на текущем такте)
-                    if (wr_page == 1'b0)
-                        ram_page_size_0 <= wr_word_cnt + fifo_wen;
-                    else
-                        ram_page_size_1 <= wr_word_cnt + fifo_wen;
-                        
-                    wr_page           <= ~wr_page;
-                    write_done_toggle <= ~write_done_toggle;
                 end
             end
         end
@@ -263,7 +282,7 @@ module ascan #(
     //--------------------------------------------------------------------------
     // 7. Выходной автомат управления квитированием (домен sys_clk)
     //--------------------------------------------------------------------------
-    reg [ADDR_WIDTH-1:0] rd_addr;
+    reg [15:0]           rd_addr;        // Расширено до 16 бит во избежание переполнения/зависания при размере 2048
     reg                  out_vld;
     reg [31:0]           out_data;
     reg                  ram_read_en_d1;
@@ -271,15 +290,15 @@ module ascan #(
 
     wire [31:0] current_ram_data = (rd_page == 1'b0) ? ram0_rd_data : ram1_rd_data;
     
-    assign ram_rd_addr = rd_addr;
-    assign ram_rd_en   = read_active && (!out_vld || i_out_rdy) && (rd_addr < o_out_size[ADDR_WIDTH-1:0]);
+    assign ram_rd_addr = rd_addr[ADDR_WIDTH-1:0]; // Используются только значащие биты адреса памяти
+    assign ram_rd_en   = read_active && (!out_vld || i_out_rdy) && (rd_addr < o_out_size);
 
     assign o_out_vld   = out_vld;
     assign o_out_data  = out_data;
 
     always @(posedge sys_clk or negedge sys_rst_n) begin
         if (!sys_rst_n) begin
-            rd_addr        <= 0;
+            rd_addr        <= 16'd0;
             read_active    <= 1'b0;
             rd_page        <= 1'b0;
             read_done      <= 1'b0;
@@ -296,9 +315,15 @@ module ascan #(
 
             // Старт чтения новой страницы памяти
             if (!read_active && (pages_avail > 0)) begin
-                read_active   <= 1'b1;
-                rd_addr       <= 0;
-                words_out_cnt <= 16'd0;
+                if (current_page_size == 16'd0) begin
+                    // Если страница пустая, сразу переключаем её и декрементируем счетчик, избегая зависания
+                    read_done <= 1'b1;
+                    rd_page   <= ~rd_page;
+                end else begin
+                    read_active   <= 1'b1;
+                    rd_addr       <= 16'd0;
+                    words_out_cnt <= 16'd0;
+                end
             end
 
             if (ram_rd_en) begin
@@ -322,7 +347,7 @@ module ascan #(
                     if (words_out_cnt == o_out_size - 1) begin
                         read_active   <= 1'b0;
                         rd_page       <= ~rd_page;
-                        read_done     <= 1'b1;
+                        read_done     <= 1'b1; // Импульс вычитания готовой страницы
                     end
                 end
             end
